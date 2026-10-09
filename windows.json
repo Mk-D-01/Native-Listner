@@ -1,9 +1,13 @@
 {
   "brave": { "process": "brave" },
+  "youtube": { "process": "brave", "title": "YouTube", "tab": true },
   "git hub": { "process": "GitHubDesktop" },
   "claude": { "process": "claude" },
   "code": { "process": "Code" },
   "dead": { "process": "deadcells" },
   "notepad": { "process": "Notepad" },
-  "spotify": { "process": "Spotify" }
+  "spotify": { "process": "Spotify" },
+  "calculator": { "process": "ApplicationFrameHost", "title": "Calculator" },
+  "steam": { "process": "steamwebhelper", "title": "Steam" },
+  "music": { "process": "Microsoft.Media.Player" }
 }

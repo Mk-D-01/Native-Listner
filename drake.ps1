@@ -104,6 +104,14 @@ $listen += New-Gram 'cmd'  @('set volume', $numCh)
 $wins = [ordered]@{}
 $winCfg = Read-Json 'windows.json'
 if ($winCfg) { $winCfg.PSObject.Properties | ForEach-Object { $wins[$_.Name] = $_.Value } }
+# Every app in apps.json that points at an .exe is closable/switchable too (process = exe name).
+# URL/URI apps (and exes whose window belongs to another process) need an entry in windows.json.
+foreach ($n in $names) {
+    $t = [string]$apps.PSObject.Properties[$n].Value
+    if (-not $wins.Contains($n) -and $t -match '\.exe$') {
+        $wins[$n] = [pscustomobject]@{ process = [IO.Path]::GetFileNameWithoutExtension($t) }
+    }
+}
 if ($wins.Count) {
     $swCh   = Choice @($wins.Keys)
     $idle   += New-Gram 'full'  @($hd, 'switch to', $swCh)
@@ -153,6 +161,31 @@ public static class Win {
     [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
 
     [DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr h, uint cmd);
+    [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr h, int idx);
+
+    public static bool IsForeground(IntPtr h) { return GetForegroundWindow() == h; }
+
+    // All visible titled windows right now (used to spot the window an app creates after launch).
+    public static IntPtr[] Snapshot() {
+        var l = new System.Collections.Generic.List<IntPtr>();
+        EnumWindows(delegate(IntPtr h, IntPtr x) { if (Matches(h, null, null)) l.Add(h); return true; }, IntPtr.Zero);
+        return l.ToArray();
+    }
+
+    // Topmost real window (no tool windows / owned dialogs) that was not in the earlier snapshot.
+    public static IntPtr NewSince(IntPtr[] before) {
+        IntPtr found = IntPtr.Zero;
+        EnumWindows(delegate(IntPtr h, IntPtr x) {
+            if (!Matches(h, null, null) || Array.IndexOf(before, h) >= 0) return true;
+            if ((GetWindowLong(h, -20) & 0x80) != 0) return true;   // WS_EX_TOOLWINDOW
+            if (GetWindow(h, 4) != IntPtr.Zero) return true;        // GW_OWNER
+            found = h;
+            return false;
+        }, IntPtr.Zero);
+        return found;
+    }
 
     // Visible titled window whose process name and/or title substring match.
     static bool Matches(IntPtr h, string proc, string title) {
@@ -263,8 +296,45 @@ function Switch-To($name) {
 
 function Close-App($name) {
     $w = $wins[$name]
+    if ($w.tab) {
+        # Browser tab (e.g. youtube): close just that tab with Ctrl+W, only if we really got focus on its window
+        $h = [Win]::Find($w.process, $w.title)
+        if ($h -eq [IntPtr]::Zero) { Write-Host "[drake] no open window matches '$name'"; return }
+        [Win]::Focus($h); Start-Sleep -Milliseconds 400
+        if ([Win]::IsForeground($h)) {
+            Add-Type -AssemblyName System.Windows.Forms
+            [System.Windows.Forms.SendKeys]::SendWait('^w')
+            Write-Host "[drake] close $name -> closed the active tab"
+        } else {
+            Write-Host "[drake] couldn't focus the $name window, not closing"
+        }
+        return
+    }
     $n = [Win]::Close($w.process, $w.title)
     Write-Host "[drake] close $name -> asked $n window(s) to close"
+}
+
+# Start something, then pull the window it creates (or the app's existing window) to the front.
+function Start-InFront($spec, [scriptblock]$start) {
+    $wasRunning = $spec -and ([Win]::Find($spec.process, $spec.title) -ne [IntPtr]::Zero)
+    $before = [Win]::Snapshot()
+    & $start
+    $limit = if ($wasRunning) { 2.5 } else { 10 }   # already open: little point waiting for a new window
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $h = [IntPtr]::Zero
+    while ($clock.Elapsed.TotalSeconds -lt $limit -and $h -eq [IntPtr]::Zero) {
+        $h = [Win]::NewSince($before)
+        if ($h -eq [IntPtr]::Zero -and $spec -and -not $wasRunning) { $h = [Win]::Find($spec.process, $spec.title) }
+        if ($h -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 250 }
+    }
+    if ($h -eq [IntPtr]::Zero -and $wasRunning) { $h = [Win]::Find($spec.process, $spec.title) }
+    if ($h -eq [IntPtr]::Zero) { Write-Host '[drake] no window appeared to bring forward'; return }
+    [Win]::Focus($h)
+    if ($spec) {   # splash screens get replaced by the real window a moment later
+        Start-Sleep -Milliseconds 1500
+        $h2 = [Win]::Find($spec.process, $spec.title)
+        if ($h2 -ne [IntPtr]::Zero -and $h2 -ne $h) { [Win]::Focus($h2) }
+    }
 }
 
 # Deaf to everything except "drake get up" (also disables "hey drake quit").
@@ -288,7 +358,9 @@ function Suspend-Drake {
 function Play-Song($name) {
     $path = if ($songs.Contains($name)) { $songs[$name] } else { @($songs.Values) | Get-Random }
     Write-Host "[drake] playing $path"
-    Invoke-Item -LiteralPath $path   # opens in your default music player ([ ] in names is safe)
+    $spec = if ($wins.Contains('music')) { $wins['music'] } else { $null }   # your player's window rule
+    # opens in your default music player ([ ] in names is safe)
+    Start-InFront $spec { Invoke-Item -LiteralPath $path }
 }
 
 function Run-Command($text) {
@@ -308,10 +380,13 @@ function Launch($text) {
     if ($app) {
         Write-Host "[drake] launching $app"
         $t = $apps.$app
-        if (Test-Path -LiteralPath $t -PathType Leaf) {
-            Start-Process -FilePath $t -WorkingDirectory (Split-Path $t -Parent)
-        } else {
-            Start-Process $t
+        $spec = if ($wins.Contains($app)) { $wins[$app] } else { $null }
+        Start-InFront $spec {
+            if (Test-Path -LiteralPath $t -PathType Leaf) {
+                Start-Process -FilePath $t -WorkingDirectory (Split-Path $t -Parent)
+            } else {
+                Start-Process $t
+            }
         }
     }
 }
