@@ -1,0 +1,9 @@
+{
+  "brave": { "process": "brave" },
+  "git hub": { "process": "GitHubDesktop" },
+  "claude": { "process": "claude" },
+  "code": { "process": "Code" },
+  "dead": { "process": "deadcells" },
+  "notepad": { "process": "Notepad" },
+  "spotify": { "process": "Spotify" }
+}
