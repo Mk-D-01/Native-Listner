@@ -21,7 +21,13 @@ function Log-Error($msg) {
 }
 # A broken/missing JSON file disables that feature instead of killing Drake.
 function Read-Json($file) {
-    try { Get-Content (Join-Path $PSScriptRoot $file) -Raw | ConvertFrom-Json }
+    try {
+        $path = Join-Path $PSScriptRoot $file
+        $example = $path -replace '\.json$', '.example.json'
+        # fresh clone: create your personal (git-ignored) copy from the example
+        if (-not (Test-Path $path) -and (Test-Path $example)) { Copy-Item $example $path }
+        Get-Content $path -Raw | ConvertFrom-Json
+    }
     catch { Log-Error "$file unreadable, ignoring it: $($_.Exception.Message)"; $null }
 }
 
